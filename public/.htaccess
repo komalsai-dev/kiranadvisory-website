@@ -1,0 +1,19 @@
+RewriteEngine On
+RewriteBase /
+
+# Allow direct access to /public/ without rewriting
+RewriteCond %{REQUEST_URI} ^/public/ [NC]
+RewriteRule ^ - [L]
+
+# Serve files from public directory (clean URLs)
+RewriteCond %{REQUEST_URI} ^/(favicon\.ico|sitemap\.xml|robots\.txt|vite\.svg|apple-touch-icon\.png|favicon-32x32\.png|favicon-16x16\.png|site\.webmanifest|android-chrome-192x192\.png|android-chrome-512x512\.png|assets/.*)$ [NC]
+RewriteRule ^(.*)$ public/$1 [L]
+
+# Allow index.html directly
+RewriteRule ^index\.html$ - [L]
+
+# SPA fallback
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME} !-l
+RewriteRule . /index.html [L]
