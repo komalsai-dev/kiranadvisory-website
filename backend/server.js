@@ -42,7 +42,8 @@ const upload = multer({
 // Cloudinary folder for gallery images
 const GALLERY_FOLDER = 'kiran-gallery';
 
-// In-memory storage for metadata (since Render has ephemeral file system)
+// In-memory storage for metadata (optional - used for performance only)
+// Metadata is always fetched from Cloudinary, so this is not critical for functionality
 let imageMetadata = new Map();
 
 // Routes
@@ -55,18 +56,36 @@ app.get('/api/gallery', async (req, res) => {
       .execute();
 
     // Transform Cloudinary results to match frontend expectations
-    const images = result.resources.map((resource, index) => {
+    const images = await Promise.all(result.resources.map(async (resource, index) => {
       const imageId = resource.asset_id || resource.public_id;
       
-      // Get metadata from in-memory storage first, then fallback to Cloudinary context
-      const storedMetadata = imageMetadata.get(imageId);
-      let title = storedMetadata?.title || 
+      // Always fetch full resource details from Cloudinary for reliable metadata
+      let cloudinaryMetadata = null;
+      try {
+        const fullResource = await cloudinary.api.resource(resource.public_id);
+        cloudinaryMetadata = fullResource;
+        console.log(`🔍 Fetched full resource for ${resource.public_id}:`, {
+          context: fullResource.context,
+          metadata: fullResource.metadata
+        });
+      } catch (fetchError) {
+        console.log(`⚠ Could not fetch full resource for ${resource.public_id}:`, fetchError.message);
+      }
+      
+      // Try multiple sources for title and description (prioritize Cloudinary metadata)
+      let title = cloudinaryMetadata?.context?.custom?.title ||
+                  cloudinaryMetadata?.context?.title || 
+                  cloudinaryMetadata?.context?.alt || 
+                  cloudinaryMetadata?.context?.caption ||
                   resource.context?.custom?.title || 
                   resource.context?.title || 
                   resource.context?.alt || 
+                  resource.context?.caption ||
                   `Gallery Image ${index + 1}`;
       
-      let description = storedMetadata?.description || 
+      let description = cloudinaryMetadata?.context?.custom?.description ||
+                        cloudinaryMetadata?.context?.description || 
+                        cloudinaryMetadata?.context?.caption || 
                         resource.context?.custom?.description || 
                         resource.context?.description || 
                         resource.context?.caption || 
@@ -76,8 +95,8 @@ app.get('/api/gallery', async (req, res) => {
       if (index < 3) { // Log first 3 images for debugging
         console.log(`🔍 Image ${index + 1} metadata:`, {
           public_id: resource.public_id,
-          stored_metadata: storedMetadata,
-          context: resource.context,
+          cloudinary_metadata: cloudinaryMetadata?.context,
+          search_result_context: resource.context,
           final_title: title,
           final_description: description
         });
@@ -91,7 +110,7 @@ app.get('/api/gallery', async (req, res) => {
         publicId: resource.public_id,
         uploadedAt: resource.created_at
       };
-    });
+    }));
 
     // Sort images by upload date (newest first)
     images.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
@@ -184,10 +203,70 @@ app.post('/api/gallery/upload', upload.single('image'), async (req, res) => {
   }
 });
 
+// Route to refresh metadata from Cloudinary for existing images
+app.post('/api/gallery/refresh-metadata', async (req, res) => {
+  try {
+    console.log('🔄 Refreshing metadata from Cloudinary...');
+    
+    // Fetch all images from Cloudinary gallery folder
+    const result = await cloudinary.search
+      .expression(`folder:${GALLERY_FOLDER}`)
+      .max_results(100)
+      .execute();
+
+    let refreshedCount = 0;
+    
+    // Process each image to refresh metadata
+    for (const resource of result.resources) {
+      const imageId = resource.asset_id || resource.public_id;
+      
+      try {
+        // Fetch full resource details from Cloudinary
+        const fullResource = await cloudinary.api.resource(resource.public_id);
+        
+        // Extract metadata from Cloudinary
+        const title = fullResource.context?.custom?.title ||
+                     fullResource.context?.title || 
+                     fullResource.context?.alt || 
+                     fullResource.context?.caption ||
+                     `Gallery Image ${refreshedCount + 1}`;
+        
+        const description = fullResource.context?.custom?.description ||
+                           fullResource.context?.description || 
+                           fullResource.context?.caption || 
+                           '';
+        
+        // Update in-memory storage (for performance, but not critical for functionality)
+        imageMetadata.set(imageId, {
+          title: title,
+          description: description,
+          uploadedAt: fullResource.created_at
+        });
+        
+        refreshedCount++;
+        console.log(`✅ Refreshed metadata for ${resource.public_id}: "${title}"`);
+        
+      } catch (fetchError) {
+        console.log(`⚠ Could not refresh metadata for ${resource.public_id}:`, fetchError.message);
+      }
+    }
+    
+    console.log(`✅ Refreshed metadata for ${refreshedCount} images`);
+    res.json({ 
+      message: `Successfully refreshed metadata for ${refreshedCount} images`,
+      refreshedCount: refreshedCount
+    });
+    
+  } catch (error) {
+    console.error('❌ Error refreshing metadata:', error);
+    res.status(500).json({ error: 'Failed to refresh metadata' });
+  }
+});
+
 app.delete('/api/gallery/:id', async (req, res) => {
   try {
     const imageId = req.params.id;
-    console.log(`🗑️ Attempting to delete image with ID: ${imageId}`);
+    console.log(`🗑 Attempting to delete image with ID: ${imageId}`);
     
     // First, try to find the image to get the correct public_id
     const searchResult = await cloudinary.search
@@ -212,7 +291,7 @@ app.delete('/api/gallery/:id', async (req, res) => {
     if (result.result === 'ok') {
       // Remove metadata from in-memory storage
       imageMetadata.delete(imageId);
-      console.log(`🗑️ Removed metadata from memory for image: ${imageId}`);
+      console.log(`🗑 Removed metadata from memory for image: ${imageId}`);
       
       console.log(`✅ Deleted image from Cloudinary: ${imageToDelete.public_id}`);
       res.json({ message: 'Image deleted successfully' });
@@ -235,6 +314,6 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📸 Gallery API available at http://localhost:${PORT}/api/gallery`);
-  console.log(`☁️  Using Cloudinary folder: ${GALLERY_FOLDER}`);
+  console.log(`☁  Using Cloudinary folder: ${GALLERY_FOLDER}`);
   console.log(`💾 All data stored in Cloudinary - no local file dependencies`);
 });
